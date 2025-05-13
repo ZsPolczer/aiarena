@@ -1,7 +1,7 @@
 # evo_arena/main.py
 import pygame
 import argparse
-import os # For checking file existence
+import os 
 from arena.arena import Arena
 from agents.body import AgentBody
 from agents.brain import TinyNet 
@@ -12,8 +12,16 @@ from storage import persist
 # --- Configuration ---
 ARENA_WIDTH = 800
 ARENA_HEIGHT = 800
-FPS = 50 
+VISUAL_FPS = 50  # FPS for visual modes (manual, match, show)
 
+# --- Simulation Parameters for Headless Training ---
+# SIMULATION_DT defines the time step for headless calculations.
+# A larger DT means fewer steps per simulated second = faster training.
+# Example: 1.0/30.0 means 30 simulation "ticks" per second.
+SIMULATION_DT = 1.0 / 30.0 
+MATCH_DURATION_SECONDS = 60 # Desired duration of a simulated match in game time
+
+# Agent Parameters (units are per second, behavior scales with dt)
 AGENT_BASE_SPEED = 150 
 AGENT_ROTATION_SPEED_DPS = 180 
 AGENT_RADIUS = 15
@@ -22,7 +30,7 @@ WALL_BOUNCE_LOSS_FACTOR = 0.9
 MANUAL_AGENT_COLOR = (0, 150, 255) 
 DUMMY_AGENT_COLOR = (255, 100, 0)  
 AI_AGENT_COLOR = (0, 200, 50)     
-AI_AGENT_COLOR_2 = (150, 50, 200) # For second AI in match mode
+AI_AGENT_COLOR_2 = (150, 50, 200) 
 
 WEAPON_RANGE = 150            
 WEAPON_ARC_DEG = 90           
@@ -37,7 +45,9 @@ DEFAULT_POPULATION_SIZE = 32
 DEFAULT_NUM_ELITES = 4      
 DEFAULT_MUTATION_SIGMA = 0.2
 DEFAULT_EVAL_MATCHES = 4    
-DEFAULT_MATCH_MAX_STEPS = 3000 
+# Default match_max_steps is now calculated based on SIMULATION_DT and MATCH_DURATION_SECONDS
+DEFAULT_MATCH_MAX_STEPS = int(MATCH_DURATION_SECONDS / SIMULATION_DT)
+
 
 def run_manual_simulation():
     """Runs the simulation with one manual agent, one dummy, and one AI agent."""
@@ -71,17 +81,21 @@ def run_manual_simulation():
     game_arena.add_agent(ai_agent)
 
     game_viewer = Viewer(ARENA_WIDTH, ARENA_HEIGHT, game_arena, title="Evo Arena - Manual & AI Test")
-    game_viewer.run_simulation_loop(FPS, manual_agent_id="player")
+    game_viewer.run_simulation_loop(VISUAL_FPS, manual_agent_id="player") # Uses VISUAL_FPS for display
 
 
-def run_training_session(generations, population_size, num_elites, mutation_sigma, eval_matches, match_steps):
+def run_training_session(generations, population_size, num_elites, mutation_sigma, eval_matches, match_steps, sim_dt):
     """
     Initializes and runs the evolutionary training process.
     """
     print("\n" + "="*30)
     print(" STARTING EVOLUTIONARY TRAINING ")
-    # ... (rest of the function remains the same)
-    print(f"Default Agent HP for Eval: {DEFAULT_AGENT_HP_MAIN}") 
+    print("="*30)
+    print(f"Parameters: Generations={generations}, Population Size={population_size}, Elites={num_elites}")
+    print(f"Mutation Sigma={mutation_sigma}, Eval Matches/Genome={eval_matches}")
+    print(f"Simulation DT for training: {sim_dt:.4f} ({1.0/sim_dt:.1f} ticks/sec)")
+    print(f"Match Steps: {match_steps} (target duration: {match_steps * sim_dt:.1f}s)")
+    print(f"Default Agent HP for Eval: {DEFAULT_AGENT_HP_MAIN}")
     print("="*30 + "\n")
 
     evo_orchestrator = EvolutionOrchestrator(
@@ -90,8 +104,8 @@ def run_training_session(generations, population_size, num_elites, mutation_sigm
         mutation_sigma=mutation_sigma,
         arena_width=ARENA_WIDTH, 
         arena_height=ARENA_HEIGHT,
-        match_max_steps=match_steps,
-        match_dt=(1.0/FPS), 
+        match_max_steps=match_steps, # Pass the calculated steps
+        match_dt=sim_dt,             # Pass the SIMULATION_DT for headless
         num_eval_matches_per_genome=eval_matches,
         default_agent_hp=DEFAULT_AGENT_HP_MAIN 
     )
@@ -105,6 +119,11 @@ def run_training_session(generations, population_size, num_elites, mutation_sigm
         print(f"\nTraining complete. Best overall fitness: {best_overall_genome.fitness:.4f}")
         
         try:
+            # Ensure storage/genomes directory exists
+            if not os.path.exists("storage/genomes"):
+                os.makedirs("storage/genomes")
+                print("Created directory: storage/genomes")
+
             saved_path = persist.save_genome(
                 best_overall_genome, 
                 filename_prefix="best_trained_genome", 
@@ -115,7 +134,6 @@ def run_training_session(generations, population_size, num_elites, mutation_sigm
             print(f"Saved best overall genome to: {saved_path}")
         except Exception as e:
             print(f"Error saving best genome: {e}")
-            print("Please ensure the 'storage/genomes' directory exists.")
     else:
         print("Training completed, but no final population data available.")
     print("="*30 + "\n")
@@ -157,7 +175,7 @@ def run_visual_match(genome_path1, genome_path2):
 
     title = f"Match: {os.path.basename(genome_path1).split('.')[0]} vs {os.path.basename(genome_path2).split('.')[0]}"
     game_viewer = Viewer(ARENA_WIDTH, ARENA_HEIGHT, game_arena, title=title)
-    game_viewer.run_simulation_loop(FPS) # No manual agent ID needed
+    game_viewer.run_simulation_loop(VISUAL_FPS) # Uses VISUAL_FPS for display
 
 def run_show_genome(genome_path, scenario='vs_dummies'):
     """
@@ -175,9 +193,8 @@ def run_show_genome(genome_path, scenario='vs_dummies'):
 
     game_arena = Arena(ARENA_WIDTH, ARENA_HEIGHT, wall_bounce_loss_factor=WALL_BOUNCE_LOSS_FACTOR)
 
-    # AI Agent (the one being showcased)
     ai_agent_show = AgentBody(
-        x=ARENA_WIDTH / 2, y=ARENA_HEIGHT - 150, angle_deg=-90, # Start at bottom, facing up
+        x=ARENA_WIDTH / 2, y=ARENA_HEIGHT - 150, angle_deg=-90, 
         base_speed=AGENT_BASE_SPEED, rotation_speed_dps=AGENT_ROTATION_SPEED_DPS,
         radius=AGENT_RADIUS, color=AI_AGENT_COLOR, agent_id="ai_showcased", team_id=1,
         hp=DEFAULT_AGENT_HP_MAIN, brain=ai_brain,
@@ -187,7 +204,6 @@ def run_show_genome(genome_path, scenario='vs_dummies'):
     game_arena.add_agent(ai_agent_show)
 
     if scenario == 'vs_dummies':
-        # Add one or more dummy targets
         dummy1 = AgentBody(
             x=ARENA_WIDTH / 2, y=150, angle_deg=90, base_speed=0, rotation_speed_dps=0,
             radius=AGENT_RADIUS + 5, color=DUMMY_AGENT_COLOR, agent_id="dummy_1", team_id=2,
@@ -195,7 +211,6 @@ def run_show_genome(genome_path, scenario='vs_dummies'):
             weapon_range=0, weapon_arc_deg=0, weapon_cooldown_time=999, weapon_damage=0
         )
         game_arena.add_agent(dummy1)
-
         dummy2 = AgentBody(
             x=ARENA_WIDTH / 4, y=ARENA_HEIGHT / 2, angle_deg=0, base_speed=0, rotation_speed_dps=0,
             radius=AGENT_RADIUS + 5, color=DUMMY_AGENT_COLOR, agent_id="dummy_2", team_id=2,
@@ -203,7 +218,6 @@ def run_show_genome(genome_path, scenario='vs_dummies'):
             weapon_range=0, weapon_arc_deg=0, weapon_cooldown_time=999, weapon_damage=0
         )
         game_arena.add_agent(dummy2)
-        
         dummy3 = AgentBody(
             x=ARENA_WIDTH * 3/4, y=ARENA_HEIGHT / 2, angle_deg=180, base_speed=0, rotation_speed_dps=0,
             radius=AGENT_RADIUS + 5, color=DUMMY_AGENT_COLOR, agent_id="dummy_3", team_id=2,
@@ -212,14 +226,9 @@ def run_show_genome(genome_path, scenario='vs_dummies'):
         )
         game_arena.add_agent(dummy3)
 
-    # Add more scenarios here if needed:
-    # elif scenario == 'solo_navigation':
-    #     # Just the AI agent, maybe with some obstacles if arena supported them
-    #     pass 
-
     title = f"Showcase: {os.path.basename(genome_path).split('.')[0]} ({scenario})"
     game_viewer = Viewer(ARENA_WIDTH, ARENA_HEIGHT, game_arena, title=title)
-    game_viewer.run_simulation_loop(FPS) # No manual agent ID
+    game_viewer.run_simulation_loop(VISUAL_FPS) # Uses VISUAL_FPS for display
 
 # --- Main execution flow ---
 def main():
@@ -238,8 +247,13 @@ def main():
                         help=f"Mutation sigma (std dev for noise) (default: {DEFAULT_MUTATION_SIGMA}).")
     parser.add_argument('--eval_matches', type=int, default=DEFAULT_EVAL_MATCHES,
                         help=f"Number of evaluation matches per genome (default: {DEFAULT_EVAL_MATCHES}).")
-    parser.add_argument('--match_steps', type=int, default=DEFAULT_MATCH_MAX_STEPS,
-                        help=f"Max steps per evaluation match (default: {DEFAULT_MATCH_MAX_STEPS}).")
+    
+    parser.add_argument('--sim_dt', type=float, default=SIMULATION_DT,
+                        help=f"Simulation time step (dt) for headless training (default: {SIMULATION_DT:.4f}). Increase for faster, less accurate training.")
+    parser.add_argument('--match_steps', type=int, 
+                        default=int(MATCH_DURATION_SECONDS / SIMULATION_DT), # Default calculated based on default SIM_DT
+                        help=f"Max steps per evaluation match (default calculated for {MATCH_DURATION_SECONDS}s duration with current sim_dt).")
+
 
     # Arguments for 'match' mode
     parser.add_argument('--g1', type=str, dest='genome1_path', help="Path to the first genome file (.npz) for 'match' mode.")
@@ -247,11 +261,22 @@ def main():
 
     # Arguments for 'show' mode
     parser.add_argument('--genome', type=str, dest='show_genome_path', help="Path to the genome file (.npz) for 'show' mode.")
-    parser.add_argument('--scenario', type=str, default='vs_dummies', choices=['vs_dummies'], # Add more choices later
+    parser.add_argument('--scenario', type=str, default='vs_dummies', choices=['vs_dummies'], 
                         help="Scenario for 'show' mode (default: vs_dummies).")
 
 
     args = parser.parse_args()
+
+    # Recalculate match_steps if sim_dt is overridden by CLI, and match_steps was using the old default.
+    # This ensures match_steps corresponds to the desired MATCH_DURATION_SECONDS with the chosen sim_dt.
+    # Check if match_steps is the default calculated with the *original* SIMULATION_DT
+    is_match_steps_default = (args.match_steps == int(MATCH_DURATION_SECONDS / SIMULATION_DT))
+    if args.sim_dt != SIMULATION_DT and is_match_steps_default:
+        current_match_steps = int(MATCH_DURATION_SECONDS / args.sim_dt)
+        print(f"Note: --sim_dt changed from default. Adjusting --match_steps from {args.match_steps} to {current_match_steps} to maintain ~{MATCH_DURATION_SECONDS}s match duration.")
+    else:
+        current_match_steps = args.match_steps
+
 
     if args.mode == 'manual':
         print("Running in MANUAL mode (with a test AI agent).")
@@ -263,7 +288,8 @@ def main():
             num_elites=args.elites,
             mutation_sigma=args.mut_sigma,
             eval_matches=args.eval_matches,
-            match_steps=args.match_steps
+            match_steps=current_match_steps, # Use potentially adjusted match_steps
+            sim_dt=args.sim_dt              # Pass the simulation_dt
         )
     elif args.mode == 'match':
         if not args.genome1_path or not args.genome2_path:
@@ -283,7 +309,6 @@ def main():
         else:
             run_show_genome(args.show_genome_path, scenario=args.scenario)
     else:
-        # This case should ideally not be reached due to 'nargs=?' and 'default'
         print(f"Mode '{args.mode}' not recognized or not fully implemented yet. Running manual simulation.")
         run_manual_simulation()
 
