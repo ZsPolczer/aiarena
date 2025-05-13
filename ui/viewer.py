@@ -3,73 +3,68 @@ import pygame
 import math # For radians
 
 class Viewer:
-    def __init__(self, width, height, title="Evo Arena"):
+    def __init__(self, width, height, arena, title="Evo Arena"): # MODIFIED signature
         pygame.init()
         self.width = width
         self.height = height
         self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption(title)
+        self.arena = arena  # ADDED: Store arena instance
+        pygame.display.set_caption(title) # CORRECTED: Uses the string 'title'
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont(None, 30) # Slightly larger font
+        self.font = pygame.font.SysFont(None, 30) 
         self.info_font = pygame.font.SysFont(None, 24)
 
 
     def draw_firing_cone(self, screen, agent):
-        if not agent.is_alive() or not agent.is_firing_command : # or agent.weapon_cooldown_timer < agent.weapon_cooldown_time * 0.9: # Show cone briefly after firing
-            # Only draw if actively trying to fire *this tick* or very recently fired.
-            # The agent.is_firing_command is set if cooldown allows and input commands fire.
-            # So this condition should be fine.
+        if not agent.is_alive() or not agent.is_firing_command :
             return
 
         cone_color = (255, 255, 0, 100)  # Yellow, semi-transparent
         
-        # Points for the cone polygon
-        # Point 1: Agent's position
         p1 = (int(agent.x), int(agent.y))
         
-        # Point 2: End of cone, left edge
         angle_left_rad = math.radians(agent.angle_deg - agent.weapon_arc_deg / 2.0)
         p2_x = agent.x + agent.weapon_range * math.cos(angle_left_rad)
         p2_y = agent.y + agent.weapon_range * math.sin(angle_left_rad)
         p2 = (int(p2_x), int(p2_y))
 
-        # Point 3: End of cone, right edge
         angle_right_rad = math.radians(agent.angle_deg + agent.weapon_arc_deg / 2.0)
         p3_x = agent.x + agent.weapon_range * math.cos(angle_right_rad)
         p3_y = agent.y + agent.weapon_range * math.sin(angle_right_rad)
         p3 = (int(p3_x), int(p3_y))
 
-        # Create a surface for transparency
         cone_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
         pygame.draw.polygon(cone_surface, cone_color, [p1, p2, p3])
         screen.blit(cone_surface, (0,0))
 
-
-    def run_manual_loop(self, arena, manual_agent, fps): # `manual_agent` ref might not be needed if arena handles all
+    # RENAMED from run_manual_loop and MODIFIED parameters
+    def run_simulation_loop(self, fps, manual_agent_id=None):
         running = True
         dt = 1.0 / fps
         match_message = ""
         game_over = False
 
-        # Store initial agent states for reset if needed (simple way)
-        for ag in arena.agents:
+        # Store initial agent states for reset if needed
+        for ag in self.arena.agents: # MODIFIED: use self.arena
             ag.initial_x = ag.x
             ag.initial_y = ag.y
             ag.initial_angle_deg = ag.angle_deg
-            ag.max_hp_initial = ag.max_hp # Store original max_hp
+            # Ensure max_hp_initial exists or is correctly initialized
+            if not hasattr(ag, 'max_hp_initial'): # Defensive check
+                 ag.max_hp_initial = ag.max_hp
 
         while running:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_r and game_over: # Reset key
-                        arena.reset() # Resets game time, agent HP/pos
-                        for ag in arena.agents: # Full agent state reset
+                    if event.key == pygame.K_r and game_over: 
+                        self.arena.reset() # MODIFIED: use self.arena
+                        for ag in self.arena.agents: # MODIFIED: use self.arena
                             ag.x = ag.initial_x
                             ag.y = ag.initial_y
                             ag.angle_deg = ag.initial_angle_deg
-                            ag.hp = ag.max_hp_initial # Use stored initial max_hp
+                            ag.hp = ag.max_hp_initial 
                             ag.weapon_cooldown_timer = 0.0
                             ag.vx = 0.0
                             ag.vy = 0.0
@@ -80,36 +75,38 @@ class Viewer:
 
             if not game_over:
                 keys = pygame.key.get_pressed()
-                # Find the manual agent in the arena list if not passed directly
-                # This assumes only one manual agent or clear identification
-                for agent_in_arena in arena.agents:
-                    if not agent_in_arena.is_dummy and agent_in_arena.brain is None: # Assuming this is our manual agent
-                        agent_in_arena.manual_control(keys)
-                        break # Process only one manual agent
+                
+                # MODIFIED: Control agent based on manual_agent_id
+                if manual_agent_id:
+                    for agent_in_arena in self.arena.agents: # MODIFIED: use self.arena
+                        if agent_in_arena.agent_id == manual_agent_id:
+                            # Make sure it's controllable (not dummy, no brain)
+                            if not agent_in_arena.is_dummy and agent_in_arena.brain is None:
+                                agent_in_arena.manual_control(keys)
+                            break 
+                
+                self.arena.update(dt) # MODIFIED: use self.arena
 
-                # Update game state
-                arena.update(dt) 
-
-                # Check for match end
-                is_over, winner_team, message = arena.check_match_end_conditions()
+                is_over, winner_team, message = self.arena.check_match_end_conditions() # MODIFIED: use self.arena
                 if is_over:
                     game_over = True
                     match_message = message
                     if winner_team is not None:
                         match_message += f" Winner: Team {winner_team}"
+                    else: # Handle draw case message more explicitly if needed
+                        match_message += " (Draw)" 
                     print(match_message)
 
 
             # Drawing
-            self.screen.fill((30, 30, 30))  # Dark grey background
-            arena.draw_bounds(self.screen)
+            self.screen.fill((30, 30, 30))
+            self.arena.draw_bounds(self.screen) # MODIFIED: use self.arena
             
-            for agent_to_draw in arena.agents:
-                agent_to_draw.draw(self.screen) # Agent draws itself (body, HP bar, etc.)
-                if agent_to_draw.is_firing_command and agent_to_draw.is_alive(): # Draw cone if firing this tick
+            for agent_to_draw in self.arena.agents: # MODIFIED: use self.arena
+                agent_to_draw.draw(self.screen) 
+                if agent_to_draw.is_firing_command and agent_to_draw.is_alive(): 
                     self.draw_firing_cone(self.screen, agent_to_draw)
             
-            # Display Game Over Message
             if game_over:
                 msg_surf = self.font.render(match_message, True, (255, 255, 0))
                 msg_rect = msg_surf.get_rect(center=(self.width / 2, self.height / 2))
@@ -119,11 +116,7 @@ class Viewer:
                 reset_rect = reset_surf.get_rect(center=(self.width / 2, self.height / 2 + 40))
                 self.screen.blit(reset_surf, reset_rect)
 
-            # Display FPS and Game Time (optional)
-            # current_fps = self.clock.get_fps()
-            # fps_text = self.info_font.render(f"FPS: {current_fps:.1f}", True, (220, 220, 220))
-            # self.screen.blit(fps_text, (10, 10))
-            time_text = self.info_font.render(f"Time: {arena.game_time:.1f}s", True, (220, 220, 220))
+            time_text = self.info_font.render(f"Time: {self.arena.game_time:.1f}s", True, (220, 220, 220)) # MODIFIED: use self.arena
             self.screen.blit(time_text, (10, 10))
 
 
