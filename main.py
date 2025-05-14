@@ -3,12 +3,15 @@ import pygame
 import argparse
 import os
 import sys # Added for sys.argv to detect CLI usage
+import glob # For finding genome files
+import itertools # For generating pairs for the tournament
+import shutil # For cleaning up old tournament genomes (used in evo.py but good to have if needed here)
 
 from arena.arena import Arena
 from agents.body import AgentBody
 from agents.brain import TinyNet
 from ui.viewer import Viewer
-from evolve.evo import EvolutionOrchestrator
+from evolve.evo import EvolutionOrchestrator, BEST_GENOMES_PER_GENERATION_DIR # Import the constant
 from storage import persist
 
 # --- Configuration ---
@@ -48,10 +51,10 @@ DEFAULT_MUTATION_SIGMA = 0.2
 DEFAULT_EVAL_MATCHES = 4
 DEFAULT_MATCH_MAX_STEPS = int(MATCH_DURATION_SECONDS / SIMULATION_DT)
 
-GENOME_STORAGE_DIR = "storage/genomes" # Added for consistency
+GENOME_STORAGE_DIR = "storage/genomes"
 
-# --- Core Simulation Functions (unchanged) ---
-def run_manual_simulation(opponent_genome_path=None): # MODIFIED: Added opponent_genome_path
+# --- Core Simulation Functions ---
+def run_manual_simulation(opponent_genome_path=None):
     """
     Runs the simulation with one manual agent.
     If opponent_genome_path is provided, loads a trained AI as the opponent.
@@ -59,22 +62,17 @@ def run_manual_simulation(opponent_genome_path=None): # MODIFIED: Added opponent
     """
     game_arena = Arena(ARENA_WIDTH, ARENA_HEIGHT, wall_bounce_loss_factor=WALL_BOUNCE_LOSS_FACTOR)
 
-    # Manual Player Agent
     manual_agent = AgentBody(
-        x=ARENA_WIDTH / 2, y=ARENA_HEIGHT - 100, # Start at bottom-middle
-        angle_deg=-90, # Facing up
-        base_speed=AGENT_BASE_SPEED,
-        rotation_speed_dps=AGENT_ROTATION_SPEED_DPS, radius=AGENT_RADIUS,
+        x=ARENA_WIDTH / 2, y=ARENA_HEIGHT - 100, angle_deg=-90,
+        base_speed=AGENT_BASE_SPEED, rotation_speed_dps=AGENT_ROTATION_SPEED_DPS, radius=AGENT_RADIUS,
         color=MANUAL_AGENT_COLOR, agent_id="player", team_id=PLAYER_TEAM_ID,
-        hp=DEFAULT_AGENT_HP_MAIN + 50, # Player gets a bit more HP
-        brain=None,
+        hp=DEFAULT_AGENT_HP_MAIN + 50, brain=None,
         weapon_range=WEAPON_RANGE, weapon_arc_deg=WEAPON_ARC_DEG,
         weapon_cooldown_time=WEAPON_COOLDOWN_TIME, weapon_damage=WEAPON_DAMAGE,
         cooldown_jitter_factor=COOLDOWN_JITTER_FACTOR
     )
     game_arena.add_agent(manual_agent)
 
-    # AI Opponent Agent
     ai_opponent_brain = None
     ai_opponent_id = "ai_opponent_random"
     if opponent_genome_path:
@@ -85,33 +83,26 @@ def run_manual_simulation(opponent_genome_path=None): # MODIFIED: Added opponent
             print(f"Successfully loaded trained opponent: {ai_opponent_id}")
         except FileNotFoundError:
             print(f"Warning: Opponent genome file not found at {opponent_genome_path}. Using random AI opponent.")
-            ai_opponent_brain = TinyNet() # Fallback to random brain
+            ai_opponent_brain = TinyNet()
         except Exception as e:
             print(f"Warning: Error loading opponent genome ({e}). Using random AI opponent.")
-            ai_opponent_brain = TinyNet() # Fallback to random brain
+            ai_opponent_brain = TinyNet()
     else:
         print("No opponent genome specified. Using random AI opponent.")
-        ai_opponent_brain = TinyNet() # Default to random brain
+        ai_opponent_brain = TinyNet()
 
     ai_opponent = AgentBody(
-        x=ARENA_WIDTH / 2, y=100, # Start at top-middle
-        angle_deg=90, # Facing down
-        base_speed=AGENT_BASE_SPEED * 0.9, # Slightly slower or same speed as player
-        rotation_speed_dps=AGENT_ROTATION_SPEED_DPS * 0.9,
-        radius=AGENT_RADIUS,
-        color=AI_OPPONENT_COLOR,
-        agent_id=ai_opponent_id,
-        team_id=AI_OPPONENT_TEAM_ID, # Different team from player
-        hp=DEFAULT_AGENT_HP_MAIN,
-        brain=ai_opponent_brain,
+        x=ARENA_WIDTH / 2, y=100, angle_deg=90,
+        base_speed=AGENT_BASE_SPEED * 0.9, rotation_speed_dps=AGENT_ROTATION_SPEED_DPS * 0.9,
+        radius=AGENT_RADIUS, color=AI_OPPONENT_COLOR, agent_id=ai_opponent_id,
+        team_id=AI_OPPONENT_TEAM_ID, hp=DEFAULT_AGENT_HP_MAIN, brain=ai_opponent_brain,
         weapon_range=WEAPON_RANGE, weapon_arc_deg=WEAPON_ARC_DEG,
         weapon_cooldown_time=WEAPON_COOLDOWN_TIME, weapon_damage=WEAPON_DAMAGE,
         cooldown_jitter_factor=COOLDOWN_JITTER_FACTOR
     )
     game_arena.add_agent(ai_opponent)
 
-    # Optional: Add some dummy targets for more chaos or if no AI opponent is loaded
-    if not opponent_genome_path : # Only add dummies if not fighting a specific trained AI to keep focus
+    if not opponent_genome_path :
         dummy_target_1 = AgentBody(
             x=100, y=ARENA_HEIGHT / 2, angle_deg=0, base_speed=0,
             rotation_speed_dps=0, radius=AGENT_RADIUS, color=DUMMY_AGENT_COLOR,
@@ -119,7 +110,6 @@ def run_manual_simulation(opponent_genome_path=None): # MODIFIED: Added opponent
             weapon_range=0, weapon_arc_deg=0, weapon_cooldown_time=999, weapon_damage=0
         )
         game_arena.add_agent(dummy_target_1)
-
         dummy_target_2 = AgentBody(
             x=ARENA_WIDTH - 100, y=ARENA_HEIGHT / 2, angle_deg=180, base_speed=0,
             rotation_speed_dps=0, radius=AGENT_RADIUS, color=DUMMY_AGENT_COLOR,
@@ -127,7 +117,6 @@ def run_manual_simulation(opponent_genome_path=None): # MODIFIED: Added opponent
             weapon_range=0, weapon_arc_deg=0, weapon_cooldown_time=999, weapon_damage=0
         )
         game_arena.add_agent(dummy_target_2)
-
 
     title = f"Manual Play vs {ai_opponent_id}"
     game_viewer = Viewer(ARENA_WIDTH, ARENA_HEIGHT, game_arena, title=title)
@@ -143,6 +132,7 @@ def run_training_session(generations, population_size, num_elites, mutation_sigm
     print(f"Simulation DT for training: {sim_dt:.4f} ({1.0/sim_dt:.1f} ticks/sec)")
     print(f"Match Steps: {match_steps} (target duration: {match_steps * sim_dt:.1f}s)")
     print(f"Default Agent HP for Eval: {DEFAULT_AGENT_HP_MAIN}")
+    print(f"Best genomes per generation will be saved to: {BEST_GENOMES_PER_GENERATION_DIR}")
     print("="*30 + "\n")
 
     evo_orchestrator = EvolutionOrchestrator(
@@ -163,23 +153,24 @@ def run_training_session(generations, population_size, num_elites, mutation_sigm
         final_population.sort(key=lambda genome: genome.fitness, reverse=True)
         best_overall_genome = final_population[0]
 
-        print(f"\nTraining complete. Best overall fitness: {best_overall_genome.fitness:.4f}")
+        print(f"\nTraining complete. Best overall fitness in final population: {best_overall_genome.fitness:.4f}")
 
         try:
-            if not os.path.exists(GENOME_STORAGE_DIR):
-                os.makedirs(GENOME_STORAGE_DIR)
-                print(f"Created directory: {GENOME_STORAGE_DIR}")
+            final_best_dir = os.path.join(GENOME_STORAGE_DIR, "final_bests")
+            if not os.path.exists(final_best_dir):
+                os.makedirs(final_best_dir)
+                print(f"Created directory: {final_best_dir}")
 
             saved_path = persist.save_genome(
                 best_overall_genome,
-                filename_prefix="best_trained_genome",
-                directory=GENOME_STORAGE_DIR,
-                generation=generations,
+                filename_prefix="final_best_genome",
+                directory=final_best_dir, # Save to a sub-directory
+                generation=generations, # Total generations run
                 fitness=best_overall_genome.fitness
             )
-            print(f"Saved best overall genome to: {saved_path}")
+            print(f"Saved best overall genome from final population to: {saved_path}")
         except Exception as e:
-            print(f"Error saving best genome: {e}")
+            print(f"Error saving best genome from final population: {e}")
     else:
         print("Training completed, but no final population data available.")
     print("="*30 + "\n")
@@ -273,6 +264,123 @@ def run_show_genome(genome_path, scenario='vs_dummies'):
     game_viewer = Viewer(ARENA_WIDTH, ARENA_HEIGHT, game_arena, title=title)
     game_viewer.run_simulation_loop(VISUAL_FPS)
 
+# --- New Function for Post-Training Tournament ---
+def run_post_training_tournament(tournament_genome_dir=None, visual=False):
+    if tournament_genome_dir is None:
+        # Ensure BEST_GENOMES_PER_GENERATION_DIR is defined if this is called before orchestrator init
+        # It's imported from evolve.evo, so it should be available.
+        tournament_genome_dir = BEST_GENOMES_PER_GENERATION_DIR
+
+    print(f"\n--- Post-Training Tournament of Champions from '{tournament_genome_dir}' ---")
+
+    if not os.path.exists(tournament_genome_dir):
+        print(f"Tournament directory not found: {tournament_genome_dir}")
+        print("Please run training first to generate per-generation best genomes, or specify a valid directory.")
+        return
+
+    genome_files = glob.glob(os.path.join(tournament_genome_dir, "*.npz"))
+    if not genome_files:
+        print(f"No genomes found in {tournament_genome_dir}. Cannot run tournament.")
+        return
+
+    if len(genome_files) < 2:
+        print(f"Need at least 2 genomes for a tournament. Found {len(genome_files)}.")
+        return
+
+    print(f"Found {len(genome_files)} champion genomes for the tournament.")
+
+    champions = []
+    for gf_path in genome_files:
+        try:
+            brain = persist.load_genome(gf_path)
+            # Extract generation from filename if possible for better naming
+            filename_base = os.path.basename(gf_path)
+            gen_part = filename_base.split('_g')[1].split('_')[0] if '_g' in filename_base else "unk"
+            champ_name = f"Gen{gen_part}_{filename_base.split('_fit')[0]}" if '_fit' in filename_base else filename_base
+            champions.append({'path': gf_path, 'name': champ_name, 'brain': brain, 'wins': 0, 'score': 0.0})
+        except Exception as e:
+            print(f"Warning: Could not load genome {gf_path}: {e}")
+
+    if len(champions) < 2:
+        print("Not enough valid champions loaded for a tournament.")
+        return
+
+    print(f"Successfully loaded {len(champions)} champions.")
+
+    arena = Arena(ARENA_WIDTH, ARENA_HEIGHT, wall_bounce_loss_factor=WALL_BOUNCE_LOSS_FACTOR)
+    match_dt = SIMULATION_DT
+    max_steps_tournament = int(MATCH_DURATION_SECONDS / match_dt)
+
+    match_count = 0
+    for champ1_idx, champ2_idx in itertools.combinations(range(len(champions)), 2):
+        champ1 = champions[champ1_idx]
+        champ2 = champions[champ2_idx]
+        match_count +=1
+
+        print(f"\nMatch {match_count}: {champ1['name']} vs {champ2['name']}")
+
+        if visual:
+            run_visual_match(champ1['path'], champ2['path'])
+            print(f"Visual match displayed.")
+            while True:
+                score_input = input("Score this visual match? (Enter '1' if {} won, '2' if {} won, 'd' for draw, 's' to skip scoring for this match): ".format(champ1['name'], champ2['name'])).strip().lower()
+                if score_input == '1':
+                    champ1['wins'] += 1
+                    champ1['score'] += 1.0
+                    champ2['score'] -= 1.0
+                    break
+                elif score_input == '2':
+                    champ2['wins'] += 1
+                    champ2['score'] += 1.0
+                    champ1['score'] -= 1.0
+                    break
+                elif score_input == 'd':
+                    champ1['score'] += 0.1
+                    champ2['score'] += 0.1
+                    break
+                elif score_input == 's':
+                    break
+                else:
+                    print("Invalid input. Try again.")
+            continue
+
+        # Headless match for scoring
+        agent_configs = [
+            {'brain': champ1['brain'], 'team_id': 1, 'agent_id': champ1['name'],
+             'start_pos': (150, ARENA_HEIGHT / 2, 0), 'hp': DEFAULT_AGENT_HP_MAIN},
+            {'brain': champ2['brain'], 'team_id': 2, 'agent_id': champ2['name'],
+             'start_pos': (ARENA_WIDTH - 150, ARENA_HEIGHT / 2, 180), 'hp': DEFAULT_AGENT_HP_MAIN}
+        ]
+
+        match_results = arena.run_match(agent_configs, max_steps_tournament, match_dt)
+        winner_team_id = match_results['winner_team_id']
+
+        if winner_team_id == 1:
+            print(f"Winner: {champ1['name']}")
+            champ1['wins'] += 1
+            champ1['score'] += 1.0
+            champ2['score'] -= 1.0
+        elif winner_team_id == 2:
+            print(f"Winner: {champ2['name']}")
+            champ2['wins'] += 1
+            champ2['score'] += 1.0
+            champ1['score'] -= 1.0
+        else: # Draw
+            print("Result: Draw")
+            champ1['score'] += 0.1
+            champ2['score'] += 0.1
+
+    champions.sort(key=lambda c: (c['score'], c['wins']), reverse=True)
+
+    print("\n--- Tournament Results ---")
+    print(f"{'Rank':<5} {'Name':<50} {'Score':<10} {'Wins':<5}")
+    print("-" * 70)
+    for i, champ in enumerate(champions):
+        print(f"{i+1:<5} {champ['name']:<50} {champ['score']:<10.2f} {champ['wins']:<5}")
+
+    if champions:
+        print(f"\nOverall Tournament Winner: {champions[0]['name']} (Score: {champions[0]['score']:.2f}, Wins: {champions[0]['wins']})")
+
 
 # --- Menu Helper Functions ---
 def get_int_input(prompt, default_value):
@@ -299,36 +407,45 @@ def select_genome_file(prompt_message, allow_none=False, none_option_text="None 
     print(f"\n{prompt_message}")
 
     genome_files = []
-    if os.path.exists(GENOME_STORAGE_DIR):
-        genome_files = [f for f in os.listdir(GENOME_STORAGE_DIR) if f.endswith(".npz")]
-        genome_files.sort()
+    # Check both the main genome storage and the per-generation bests for a wider selection
+    search_dirs = [GENOME_STORAGE_DIR, BEST_GENOMES_PER_GENERATION_DIR, os.path.join(GENOME_STORAGE_DIR, "final_bests")]
+    
+    collected_paths = set() # Use a set to avoid duplicates if dirs overlap or contain same files
+
+    for s_dir in search_dirs:
+        if os.path.exists(s_dir):
+            for f_name in os.listdir(s_dir):
+                if f_name.endswith(".npz"):
+                     full_path = os.path.join(s_dir, f_name)
+                     collected_paths.add(full_path)
+    
+    sorted_paths = sorted(list(collected_paths), key=lambda p: os.path.basename(p))
+
 
     options = []
     if allow_none:
-        options.append((None, none_option_text)) # Store path and display name
+        options.append((None, none_option_text))
 
-    for f_name in genome_files:
-        options.append((os.path.join(GENOME_STORAGE_DIR, f_name), f_name))
+    for path in sorted_paths:
+        options.append((path, f"{os.path.basename(os.path.dirname(path))}/{os.path.basename(path)}")) # Show parent dir and filename
 
-    if not options and not allow_none and not genome_files: # No files and none is not allowed
-         print(f"No genomes found in '{GENOME_STORAGE_DIR}'. Cannot proceed without a genome.")
+    if not options and not allow_none and not sorted_paths:
+         print(f"No genomes found in monitored directories. Cannot proceed without a genome.")
          while True:
-            path = input(f"Please type a full path to a genome .npz file: ").strip()
-            if os.path.exists(path) and path.endswith(".npz"):
-                return path
+            path_input = input(f"Please type a full path to a genome .npz file: ").strip()
+            if os.path.exists(path_input) and path_input.endswith(".npz"):
+                return path_input
             else:
                 print("File not found or not a .npz file. Please try again.")
 
-
-    if not options: # No files listed, but allow_none might be true (though covered by first if allow_none)
-        print(f"No genomes found in '{GENOME_STORAGE_DIR}'.")
-        if allow_none:
-             user_path = input(f"Press Enter for '{none_option_text}', or type a full path to a genome: ").strip()
-             if not user_path: return None
-             if os.path.exists(user_path) and user_path.endswith(".npz"): return user_path
-             print("Invalid path specified. Defaulting to 'None'.")
-             return None
-        # This path should ideally not be reached if !allow_none and no files (covered above)
+    if not options and allow_none : # Only None option left
+        print(f"No genomes found in monitored directories.")
+        user_path = input(f"Press Enter for '{none_option_text}', or type a full path to a genome: ").strip()
+        if not user_path: return None
+        if os.path.exists(user_path) and user_path.endswith(".npz"): return user_path
+        print("Invalid path specified. Defaulting to 'None'.")
+        return None
+    elif not sorted_paths and not allow_none: # Should be caught by the above case asking for path
         return None
 
 
@@ -343,7 +460,7 @@ def select_genome_file(prompt_message, allow_none=False, none_option_text="None 
             choice_idx = int(raw_choice)
             if 0 <= choice_idx < len(options):
                 selected_path, _ = options[choice_idx]
-                return selected_path # This is None if 'None' option was selected
+                return selected_path
             else:
                 print("Invalid number.")
         except ValueError:
@@ -366,13 +483,10 @@ def menu_run_training():
     elites = get_int_input("Number of elites", DEFAULT_NUM_ELITES)
     mut_sigma = get_float_input("Mutation sigma", DEFAULT_MUTATION_SIGMA)
     eval_matches = get_int_input("Evaluation matches per genome", DEFAULT_EVAL_MATCHES)
-
     sim_dt_chosen = get_float_input("Simulation time step (dt) for training", SIMULATION_DT)
-    
-    # Calculate a sensible default for match_steps based on the chosen sim_dt
-    default_match_steps_for_chosen_dt = int(MATCH_DURATION_SECONDS / sim_dt_chosen)
+    default_match_steps_for_chosen_dt = int(MATCH_DURATION_SECONDS / sim_dt_chosen) if sim_dt_chosen > 0 else DEFAULT_MATCH_MAX_STEPS
     match_steps = get_int_input(f"Max steps per evaluation match (for ~{MATCH_DURATION_SECONDS}s duration)", default_match_steps_for_chosen_dt)
-    
+
     print(f"\nStarting training with: {generations} gens, {pop_size} pop, {elites} elites, sigma {mut_sigma:.2f}")
     print(f"Eval: {eval_matches} matches/genome. Sim DT: {sim_dt_chosen:.4f}, Match Steps: {match_steps}")
 
@@ -394,7 +508,7 @@ def menu_run_match():
     print("\n--- Visual Match Setup (AI vs AI) ---")
     print("Select the first genome (Agent 1):")
     genome1_path = select_genome_file("Choose Genome 1:", allow_none=False)
-    if not genome1_path: return # Should not happen if allow_none=False and selection is forced
+    if not genome1_path: return
 
     print("\nSelect the second genome (Agent 2):")
     genome2_path = select_genome_file("Choose Genome 2:", allow_none=False)
@@ -409,11 +523,17 @@ def menu_run_show():
     print("\n--- Show Genome Setup ---")
     genome_path = select_genome_file("Select a genome to showcase:", allow_none=False)
     if not genome_path: return
-
-    # Currently only one scenario, can be expanded later
     scenario = 'vs_dummies'
     print(f"Using scenario: {scenario}")
     run_show_genome(genome_path, scenario=scenario)
+
+def menu_run_post_tournament():
+    print("\n--- Post-Training Tournament Setup ---")
+    visual_tournament = input("Run tournament visually? (y/n, headless is faster for scoring): ").strip().lower() == 'y'
+    if visual_tournament:
+        print("Visual tournament selected. You will be prompted to score each match manually.")
+    run_post_training_tournament(visual=visual_tournament)
+
 
 def display_main_menu():
     print("\n===== Evo Arena Main Menu =====")
@@ -421,6 +541,7 @@ def display_main_menu():
     print("2. Train New AI Agents")
     print("3. Visual Match (AI vs AI)")
     print("4. Showcase a Trained AI Genome")
+    print("5. Run Post-Training Tournament of Champions")
     print("-------------------------------")
     print("0. Exit")
     print("==============================")
@@ -437,6 +558,8 @@ def main_menu_loop():
             menu_run_match()
         elif choice == '4':
             menu_run_show()
+        elif choice == '5':
+            menu_run_post_tournament()
         elif choice == '0':
             print("Exiting Evo Arena. Goodbye!")
             break
@@ -445,111 +568,75 @@ def main_menu_loop():
 
 # --- Main Execution ---
 def main():
-    # If command-line arguments are provided (more than just script name)
     if len(sys.argv) > 1:
         parser = argparse.ArgumentParser(description="Evo Arena: A simple agent evolution project.")
-        parser.add_argument('mode', nargs='?', default=None, choices=['manual', 'train', 'show', 'match'], # Default None if no mode from CLI
-                            help="Mode to run: 'manual', 'train', 'show' a genome, or 'match' two genomes. If no mode, menu is shown.")
+        parser.add_argument('mode', nargs='?', default=None, choices=['manual', 'train', 'show', 'match', 'tournament'],
+                            help="Mode to run. If no mode, menu is shown.")
 
-        # Arguments for 'train' mode
-        parser.add_argument('--generations', type=int, default=DEFAULT_GENERATIONS,
-                            help=f"Number of generations to train for (default: {DEFAULT_GENERATIONS}).")
-        parser.add_argument('--pop_size', type=int, default=DEFAULT_POPULATION_SIZE,
-                            help=f"Population size for training (default: {DEFAULT_POPULATION_SIZE}).")
-        parser.add_argument('--elites', type=int, default=DEFAULT_NUM_ELITES,
-                            help=f"Number of elite genomes to carry over (default: {DEFAULT_NUM_ELITES}).")
-        parser.add_argument('--mut_sigma', type=float, default=DEFAULT_MUTATION_SIGMA,
-                            help=f"Mutation sigma (std dev for noise) (default: {DEFAULT_MUTATION_SIGMA}).")
-        parser.add_argument('--eval_matches', type=int, default=DEFAULT_EVAL_MATCHES,
-                            help=f"Number of evaluation matches per genome (default: {DEFAULT_EVAL_MATCHES}).")
-
-        parser.add_argument('--sim_dt', type=float, default=SIMULATION_DT,
-                            help=f"Simulation time step (dt) for headless training (default: {SIMULATION_DT:.4f}). Increase for faster, less accurate training.")
-        parser.add_argument('--match_steps', type=int,
-                            default=int(MATCH_DURATION_SECONDS / SIMULATION_DT),
-                            help=f"Max steps per evaluation match (default calculated for {MATCH_DURATION_SECONDS}s duration with current sim_dt).")
-
-        # Arguments for 'manual' mode
-        parser.add_argument('--opponent_genome', type=str, dest='manual_opponent_genome_path',
-                            help="Path to a genome file (.npz) for the AI opponent in 'manual' mode. If not provided, a random AI is used.")
-
-        # Arguments for 'match' mode
-        parser.add_argument('--g1', type=str, dest='genome1_path', help="Path to the first genome file (.npz) for 'match' mode.")
-        parser.add_argument('--g2', type=str, dest='genome2_path', help="Path to the second genome file (.npz) for 'match' mode.")
-
-        # Arguments for 'show' mode
-        parser.add_argument('--genome', type=str, dest='show_genome_path', help="Path to the genome file (.npz) for 'show' mode.")
-        parser.add_argument('--scenario', type=str, default='vs_dummies', choices=['vs_dummies'],
-                            help="Scenario for 'show' mode (default: vs_dummies).")
+        parser.add_argument('--generations', type=int, default=DEFAULT_GENERATIONS)
+        parser.add_argument('--pop_size', type=int, default=DEFAULT_POPULATION_SIZE)
+        parser.add_argument('--elites', type=int, default=DEFAULT_NUM_ELITES)
+        parser.add_argument('--mut_sigma', type=float, default=DEFAULT_MUTATION_SIGMA)
+        parser.add_argument('--eval_matches', type=int, default=DEFAULT_EVAL_MATCHES)
+        parser.add_argument('--sim_dt', type=float, default=SIMULATION_DT)
+        parser.add_argument('--match_steps', type=int, default=int(MATCH_DURATION_SECONDS / SIMULATION_DT))
+        parser.add_argument('--opponent_genome', type=str, dest='manual_opponent_genome_path')
+        parser.add_argument('--g1', type=str, dest='genome1_path')
+        parser.add_argument('--g2', type=str, dest='genome2_path')
+        parser.add_argument('--genome', type=str, dest='show_genome_path')
+        parser.add_argument('--scenario', type=str, default='vs_dummies', choices=['vs_dummies'])
+        parser.add_argument('--tournament_dir', type=str, default=BEST_GENOMES_PER_GENERATION_DIR)
+        parser.add_argument('--visual_tournament', action='store_true')
 
         args = parser.parse_args()
 
-        # If mode is not specified via CLI, it defaults to None, then show menu.
-        # If a mode IS specified, nargs='?' makes args.mode hold that string.
-        if args.mode is None: # No mode explicitly passed, implies user wants menu or ran `python main.py`
+        if args.mode is None:
             print("No command-line mode specified. Launching text menu...")
             main_menu_loop()
             return
 
-
-        # Calculate effective match_steps for training if sim_dt is changed from default
-        # This logic is primarily for 'train' mode when CLI arguments are used.
         current_match_steps = args.match_steps
         if args.mode == 'train':
-            # Check if sim_dt was user-specified AND different from the code's SIMULATION_DT constant
             sim_dt_is_custom = (args.sim_dt != SIMULATION_DT)
+            # Argparse default for match_steps is based on the *code's* SIMULATION_DT constant
+            match_steps_is_argparse_default_calc = (args.match_steps == int(MATCH_DURATION_SECONDS / SIMULATION_DT))
             
-            # Check if match_steps is still its argparse-calculated default
-            # (which was based on the *original* SIMULATION_DT)
-            match_steps_is_argparse_default = (args.match_steps == int(MATCH_DURATION_SECONDS / SIMULATION_DT))
-
-            if sim_dt_is_custom and match_steps_is_argparse_default:
-                current_match_steps = int(MATCH_DURATION_SECONDS / args.sim_dt)
-                print(f"Note: --sim_dt changed from default. Adjusting --match_steps from {args.match_steps} to {current_match_steps} to maintain ~{MATCH_DURATION_SECONDS}s match duration.")
-            # else: current_match_steps remains args.match_steps (either default with default sim_dt, or user-set match_steps)
+            if sim_dt_is_custom and match_steps_is_argparse_default_calc:
+                if args.sim_dt > 0:
+                    current_match_steps = int(MATCH_DURATION_SECONDS / args.sim_dt)
+                    print(f"Note: --sim_dt changed. Adjusting --match_steps from {args.match_steps} to {current_match_steps} to maintain ~{MATCH_DURATION_SECONDS}s match duration.")
+                else:
+                    print(f"Warning: Invalid --sim_dt ({args.sim_dt}). Using default match_steps ({current_match_steps}).")
+            # If user specified --match_steps, that value is used.
+            # If sim_dt is default, then current_match_steps (which is args.match_steps) is also correct.
 
 
         if args.mode == 'manual':
             if args.manual_opponent_genome_path and not os.path.exists(args.manual_opponent_genome_path):
-                print(f"Warning: Opponent genome file for manual mode not found: {args.manual_opponent_genome_path}. A random AI will be used.")
+                print(f"Warning: Opponent genome for manual mode not found: {args.manual_opponent_genome_path}. Random AI used.")
                 run_manual_simulation(opponent_genome_path=None)
             else:
                 run_manual_simulation(opponent_genome_path=args.manual_opponent_genome_path)
-
         elif args.mode == 'train':
             run_training_session(
-                generations=args.generations,
-                population_size=args.pop_size,
-                num_elites=args.elites,
-                mutation_sigma=args.mut_sigma,
-                eval_matches=args.eval_matches,
-                match_steps=current_match_steps,
-                sim_dt=args.sim_dt
+                generations=args.generations, population_size=args.pop_size, num_elites=args.elites,
+                mutation_sigma=args.mut_sigma, eval_matches=args.eval_matches,
+                match_steps=current_match_steps, sim_dt=args.sim_dt
             )
         elif args.mode == 'match':
             if not args.genome1_path or not args.genome2_path:
-                parser.error("'match' mode requires --g1 and --g2 arguments specifying genome file paths.")
-            elif not os.path.exists(args.genome1_path):
-                parser.error(f"Genome file not found for --g1: {args.genome1_path}")
-            elif not os.path.exists(args.genome2_path):
-                parser.error(f"Genome file not found for --g2: {args.genome2_path}")
-            else:
-                run_visual_match(args.genome1_path, args.genome2_path)
-
+                parser.error("'match' mode requires --g1 and --g2.")
+            elif not os.path.exists(args.genome1_path): parser.error(f"Genome file not found for --g1: {args.genome1_path}")
+            elif not os.path.exists(args.genome2_path): parser.error(f"Genome file not found for --g2: {args.genome2_path}")
+            else: run_visual_match(args.genome1_path, args.genome2_path)
         elif args.mode == 'show':
-            if not args.show_genome_path:
-                parser.error("'show' mode requires --genome argument specifying a genome file path.")
-            elif not os.path.exists(args.show_genome_path):
-                parser.error(f"Genome file not found for --genome: {args.show_genome_path}")
-            else:
-                run_show_genome(args.show_genome_path, scenario=args.scenario)
-        # No 'else' needed here because if args.mode was None, menu_loop was called.
-        # If args.mode was an invalid choice, argparse would have exited.
-
+            if not args.show_genome_path: parser.error("'show' mode requires --genome.")
+            elif not os.path.exists(args.show_genome_path): parser.error(f"Genome file not found for --genome: {args.show_genome_path}")
+            else: run_show_genome(args.show_genome_path, scenario=args.scenario)
+        elif args.mode == 'tournament':
+            run_post_training_tournament(tournament_genome_dir=args.tournament_dir, visual=args.visual_tournament)
     else:
-        # No command-line arguments at all (just `python main.py`), so show the text menu.
         main_menu_loop()
-
 
 if __name__ == '__main__':
     main()
