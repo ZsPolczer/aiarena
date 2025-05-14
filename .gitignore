@@ -3,3 +3,4 @@ venv
 **/__pycache__
 dumper.py
 bak/
+storage/genomes/
